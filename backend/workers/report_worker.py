@@ -68,6 +68,9 @@ async def _ensure_tables():
 
 @celery_app.task(bind=True, max_retries=3)
 def generate_report(self, task_id: int):
+    # 注意：若 worker 进程被硬杀（OOM/崩溃/重启），任务会卡在 running 且没有任何
+    # 进程内钩子可清理——本任务未配置软/硬超时。后续可通过 worker 启动时扫描
+    # 孤儿 running 任务并置为 failed 来兜底（当前未实现）。
     logger.info(f"[Worker] 收到任务: task_id={task_id}")
     import asyncio
     try:
@@ -85,6 +88,11 @@ def generate_report(self, task_id: int):
 
 async def _generate_report_async(task_id: int):
     await _ensure_tables()
+    # 任务可能已被用户取消（例如上一次失败重试期间）。已取消则直接返回，
+    # 不进入执行流程，也不改写任何状态（保持 cancelled）。
+    if await ReportCRUD.is_task_cancelled(task_id):
+        logger.info(f"[Worker] 任务 {task_id} 已取消，跳过执行")
+        return False
     async with WorkerSession() as db:
         try:
             task = await ReportCRUD.get_task_with_attachments(db, task_id)
@@ -102,6 +110,11 @@ async def _generate_report_async(task_id: int):
                     logger.warning(f"[Worker] 附件解析失败: {attachment.filename}, error={e}")
                     attachment.parsed_content = f"[Parse failed: {e}]"
             await db.commit()
+
+            # 附件解析期间用户可能已停止任务：进入执行前再确认一次
+            if await ReportCRUD.is_task_cancelled(task_id):
+                logger.info(f"[Worker] 任务 {task_id} 在附件解析期间被取消，中止执行")
+                return False
 
             await ReportCRUD.update_task_status(db, task_id, "planning")
             logger.info(f"[Worker] 任务 {task_id} 状态更新为 planning")
@@ -139,6 +152,12 @@ async def _generate_report_async(task_id: int):
             context = await executor.execute(context)
             logger.info(f"[Worker] 任务 {task_id} Pipeline 执行完成")
 
+            # 取消可能发生在最后一个步骤执行期间（步骤内无法打断），
+            # 执行完再确认一次：已取消则跳过导出与结果写入，保持 cancelled 状态。
+            if await ReportCRUD.is_task_cancelled(task_id):
+                logger.info(f"[Worker] 任务 {task_id} 已取消，跳过导出与结果写入")
+                return False
+
             final_report = context.artifacts.get("polished_report") or context.artifacts.get("draft_report", "")
 
             quality_passed = context.artifacts.get("quality_passed")
@@ -175,8 +194,10 @@ async def _generate_report_async(task_id: int):
 
         except Exception as e:
             logger.exception(f"[Worker] 任务 {task_id} 执行失败: {e}")
-            await ReportCRUD.update_task_status(
-                db, task_id, "failed", error_msg=str(e)
-            )
-            await db.commit()
+            # 用户已停止的任务保持 cancelled，不覆盖为 failed
+            if not await ReportCRUD.is_task_cancelled(task_id):
+                await ReportCRUD.update_task_status(
+                    db, task_id, "failed", error_msg=str(e)
+                )
+                await db.commit()
             raise

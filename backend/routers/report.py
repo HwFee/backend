@@ -63,6 +63,30 @@ async def generate_report(
         from utils.exceptions import AppException
         raise AppException(status_code=400, message="附件数量超过限制（最多50个）")
 
+    # 限制单文件大小（默认 20MB，通过 settings.max_upload_file_size_mb 配置）
+    if files:
+        max_size = settings.max_upload_file_size_mb * 1024 * 1024
+        for file in files:
+            safe_name = Path(file.filename or "").name
+            size = getattr(file, "size", None)
+            if size is None:
+                # UploadFile.size 仅在文件落盘时可用；逐块读取统计大小，避免把超大文件整体载入内存
+                size = 0
+                while True:
+                    chunk = await file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > max_size:
+                        break
+                await file.seek(0)
+            if size > max_size:
+                from utils.exceptions import AppException
+                raise AppException(
+                    status_code=400,
+                    message=f"附件 {safe_name} 超过大小限制（最大 {settings.max_upload_file_size_mb}MB）",
+                )
+
     # FastAPI form 字段默认 latin-1 解码，但前端实际发送 GBK/UTF-8 编码
     def _fix_encoding(s: str) -> str:
         # 先尝试 latin-1 -> utf-8（标准情况）

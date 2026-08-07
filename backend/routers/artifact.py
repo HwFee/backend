@@ -3,11 +3,13 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crud.artifact import ArtifactCRUD
 from crud.report import ReportCRUD
 from crud.tool_event import ToolEventCRUD
+from models.report import ArtifactVersion
 from schemas.responses import ApiResponse
 from utils.dependencies import get_db, get_current_user
 
@@ -87,9 +89,17 @@ async def get_report_artifacts(
         raise AppException(status_code=404, message="报告不存在")
 
     artifacts = await ArtifactCRUD.get_report_artifacts(db, task_id)
+    # 单次 GROUP BY 查询统计各产物的版本数，避免逐产物循环查询版本（N+1）
+    version_counts = {}
+    if artifacts:
+        version_result = await db.execute(
+            select(ArtifactVersion.artifact_id, func.count(ArtifactVersion.id))
+            .where(ArtifactVersion.artifact_id.in_([a.id for a in artifacts]))
+            .group_by(ArtifactVersion.artifact_id)
+        )
+        version_counts = {artifact_id: count for artifact_id, count in version_result.all()}
     result = []
     for art in artifacts:
-        versions = await ArtifactCRUD.get_artifact_versions(db, art.id)
         cv = art.current_version
         cv_resp = None
         if cv:
@@ -115,7 +125,7 @@ async def get_report_artifacts(
             artifact_type=art.artifact_type,
             current_version_id=art.current_version_id,
             current_version=cv_resp,
-            version_count=len(versions),
+            version_count=version_counts.get(art.id, 0),
             created_at=art.created_at.isoformat() if art.created_at else "",
             updated_at=art.updated_at.isoformat() if art.updated_at else "",
         ))

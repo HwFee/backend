@@ -6,9 +6,9 @@ from tools.web_search import WebSearchTool
 class TestWebSearchTool:
     def test_init_without_api_key(self):
         tool = WebSearchTool()
-        # If no API keys in settings, available should be False
-        # But settings might have defaults, so just check it creates
-        assert isinstance(tool.available, bool)
+        # The tool exposes has_paid_api (bool) — False when no paid API key is configured.
+        # Settings may load real keys from .env, so only assert the type here.
+        assert isinstance(tool.has_paid_api, bool)
 
     @patch("tools.web_search.settings")
     @patch("tools.web_search.requests.get")

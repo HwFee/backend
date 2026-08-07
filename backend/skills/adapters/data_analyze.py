@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 from datetime import datetime
@@ -5,7 +6,9 @@ from datetime import datetime
 from pipeline.types import PipelineContext, PipelineStep, SkillResult
 from services.llm_client import DeepSeekClient
 from services.model_router import ModelRouter
-from tools.code_executor import CodeExecutor
+from tools.code_executor import CodeExecutor, SandboxUnavailable
+
+logger = logging.getLogger(__name__)
 
 
 class DataAnalyzeSkill:
@@ -54,15 +57,38 @@ pandas, numpy, matplotlib, seaborn, json, csv, os, sys"""
 
         if extracted_code:
             exec_started = datetime.utcnow()
-            exec_result = self.executor.run(extracted_code)
+            try:
+                exec_result = self.executor.run(extracted_code)
+            except SandboxUnavailable as e:
+                # 沙箱不可用（daemon 未运行/镜像缺失）：不回落宿主执行，跳过代码分析
+                logger.warning("数据分析跳过代码执行：%s", e)
+                exec_result = {"success": False, "output": "", "error": str(e), "skipped": True}
+
+            if exec_result.get("skipped"):
+                if "禁用" in exec_result.get("error", ""):
+                    description = "代码执行沙箱已禁用，数据分析已跳过代码执行"
+                else:
+                    description = "代码执行沙箱不可用，数据分析已跳过代码执行"
+                event_status = "skipped"
+            else:
+                description = (
+                    "代码执行成功"
+                    if exec_result.get("success")
+                    else f"代码执行失败: {exec_result.get('error', '')[:80]}"
+                )
+                event_status = "completed" if exec_result.get("success") else "failed"
 
             context.tool_events.append({
                 "event_type": "analyze_data",
                 "title": "执行数据分析代码",
-                "description": "代码执行成功" if exec_result.get("success") else f"代码执行失败: {exec_result.get('error', '')[:80]}",
-                "status": "completed" if exec_result.get("success") else "failed",
+                "description": description,
+                "status": event_status,
                 "input_data": {"code_preview": extracted_code[:300]},
-                "output_data": {"output": exec_result.get("output", "")[:500], "success": exec_result.get("success", False)},
+                "output_data": {
+                    "output": exec_result.get("output", "")[:500],
+                    "success": exec_result.get("success", False),
+                    "skipped": exec_result.get("skipped", False),
+                },
                 "started_at": exec_started,
                 "completed_at": datetime.utcnow(),
             })
@@ -127,6 +153,8 @@ pandas, numpy, matplotlib, seaborn, json, csv, os, sys"""
         return content.strip()
 
     def _explain_results(self, exec_result: dict) -> str:
+        if exec_result.get("skipped"):
+            return f"数据分析已跳过代码执行：{exec_result.get('error', '沙箱不可用')}"
         if not exec_result.get("success"):
             return f"代码执行失败：{exec_result.get('error', '未知错误')}"
         output = exec_result.get("output", "")

@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -7,6 +8,8 @@ from sqlalchemy.orm import selectinload
 
 from models.report import AgentNode, ReportAttachment, ReportTask
 from schemas.report import ReportGenerateRequest
+
+logger = logging.getLogger(__name__)
 
 
 class ReportCRUD:
@@ -111,6 +114,33 @@ class ReportCRUD:
             await db.commit()
 
     @staticmethod
+    async def get_task_status(db: AsyncSession, task_id: int) -> Optional[str]:
+        """仅读取任务状态列。
+
+        只 select status 列（不走 ORM 实体加载），绕开会话的 identity map，
+        取到的是数据库里的最新值，而不是当前会话缓存的旧快照。取消操作由
+        API 进程在另一条连接上写入，worker 会话里可能仍缓存着旧的 status。
+        """
+        result = await db.execute(
+            select(ReportTask.status).where(ReportTask.id == task_id)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def is_task_cancelled(task_id: int) -> bool:
+        """检查任务是否已被用户取消（协作式取消的轻量探针）。
+
+        使用独立会话读取最新状态，避免读到执行会话缓存的旧快照。
+        """
+        # 延迟导入：config.database 在导入时会创建数据库引擎（有副作用），
+        # 只在真正需要时引入，保证 crud 模块在无 DB 环境下可安全导入（如单元测试）。
+        from config.database import WorkerSession
+
+        async with WorkerSession() as db:
+            status = await ReportCRUD.get_task_status(db, task_id)
+            return status == "cancelled"
+
+    @staticmethod
     async def update_task_result(
         db: AsyncSession,
         task_id: int,
@@ -118,7 +148,15 @@ class ReportCRUD:
         pdf_path: str = None,
         docx_path: str = None,
     ):
-        """更新任务结果"""
+        """更新任务结果。
+
+        若任务当前状态为 cancelled（用户已停止），跳过写入，避免把 cancelled
+        覆盖回 completed。状态用 get_task_status 直读数据库，防止读到会话
+        缓存的旧快照后误覆盖。
+        """
+        if await ReportCRUD.get_task_status(db, task_id) == "cancelled":
+            logger.info(f"[CRUD] 任务 {task_id} 已取消，跳过结果写入")
+            return
         task = await ReportCRUD.get_task(db, task_id)
         if task:
             task.final_report_md = markdown

@@ -40,6 +40,7 @@ class TestPipelineExecutorDependsOn:
             mock_node.id = 100
             mock_crud.create_agent_node = AsyncMock(return_value=mock_node)
             mock_crud.update_node_status = AsyncMock()
+            mock_crud.is_task_cancelled = AsyncMock(return_value=False)
 
             plan = PipelinePlan(
                 id="test",
@@ -71,6 +72,7 @@ class TestPipelineExecutorDependsOn:
             mock_node.id = 100
             mock_crud.create_agent_node = AsyncMock(return_value=mock_node)
             mock_crud.update_node_status = AsyncMock()
+            mock_crud.is_task_cancelled = AsyncMock(return_value=False)
 
             plan = PipelinePlan(
                 id="test",
@@ -101,6 +103,7 @@ class TestPipelineExecutorDependsOn:
             mock_node.id = 100
             mock_crud.create_agent_node = AsyncMock(return_value=mock_node)
             mock_crud.update_node_status = AsyncMock()
+            mock_crud.is_task_cancelled = AsyncMock(return_value=False)
 
             plan = PipelinePlan(
                 id="test",

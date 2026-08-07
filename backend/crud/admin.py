@@ -1,15 +1,24 @@
 from datetime import datetime, timedelta
 from typing import List, Optional
-from sqlalchemy import func, select
+from sqlalchemy import Numeric, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from models.report import ReportTask, AgentNode
 from models.user import User
+
+
+def _format_duration(seconds: float) -> str:
+    """将平均耗时秒数格式化为「X分Y秒」/「Y秒」，与前端展示格式保持一致"""
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds}秒"
+    return f"{seconds // 60}分{seconds % 60}秒"
 
 
 class AdminCRUD:
     @staticmethod
     async def get_stats(db: AsyncSession) -> dict:
         today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday = today - timedelta(days=1)
         total_users = await db.scalar(select(func.count(User.id)))
         total_reports = await db.scalar(select(func.count(ReportTask.id)))
         today_reports = await db.scalar(
@@ -21,15 +30,67 @@ class AdminCRUD:
         failed_tasks = await db.scalar(
             select(func.count(ReportTask.id)).where(ReportTask.status == "failed")
         )
-        avg_duration = "8分32秒"  # Placeholder - calculate from node timings
+
+        # 平均耗时：ReportTask 没有 completed_at 列（见 models/report.py），
+        # 以已完成任务的 updated_at - created_at 近似（updated_at 在任务完成写入最终结果时更新）
+        duration_result = await db.execute(
+            select(ReportTask.updated_at, ReportTask.created_at)
+            .where(ReportTask.status == "completed")
+        )
+        durations = [
+            (updated_at - created_at).total_seconds()
+            for updated_at, created_at in duration_result.all()
+            if updated_at and created_at
+        ]
+        avg_seconds = sum(durations) / len(durations) if durations else 0
+        avg_duration = _format_duration(avg_seconds)
         pending_failures = failed_tasks
 
-        # Calculate total tokens from all nodes
-        node_result = await db.execute(select(AgentNode.token_usage))
-        all_tokens = node_result.scalars().all()
-        total_tokens = sum(
-            (t.get("total_tokens", 0) if isinstance(t, dict) else 0)
-            for t in all_tokens
+        # 在 SQL 内对 JSON 列做聚合（total_tokens 先转文本再转 NUMERIC），
+        # 避免无过滤拉全表后内存求和
+        total_tokens = await db.scalar(
+            select(func.sum(cast(AgentNode.token_usage["total_tokens"].as_string(), Numeric)))
+        )
+        total_tokens = int(total_tokens or 0)
+
+        # 趋势：今日新增数 - 昨日新增数（running/failed 为「今日创建且当前处于该状态」- 昨日对应数，
+        # 属于可计算的近似口径，不含历史状态快照）
+        users_today = await db.scalar(select(func.count(User.id)).where(User.created_at >= today))
+        users_yesterday = await db.scalar(
+            select(func.count(User.id)).where(User.created_at >= yesterday, User.created_at < today)
+        )
+        reports_today = await db.scalar(
+            select(func.count(ReportTask.id)).where(ReportTask.created_at >= today)
+        )
+        reports_yesterday = await db.scalar(
+            select(func.count(ReportTask.id)).where(
+                ReportTask.created_at >= yesterday, ReportTask.created_at < today
+            )
+        )
+        running_today = await db.scalar(
+            select(func.count(ReportTask.id)).where(
+                ReportTask.status.in_(["running", "planning"]),
+                ReportTask.created_at >= today,
+            )
+        )
+        running_yesterday = await db.scalar(
+            select(func.count(ReportTask.id)).where(
+                ReportTask.status.in_(["running", "planning"]),
+                ReportTask.created_at >= yesterday,
+                ReportTask.created_at < today,
+            )
+        )
+        failed_today = await db.scalar(
+            select(func.count(ReportTask.id)).where(
+                ReportTask.status == "failed", ReportTask.created_at >= today
+            )
+        )
+        failed_yesterday = await db.scalar(
+            select(func.count(ReportTask.id)).where(
+                ReportTask.status == "failed",
+                ReportTask.created_at >= yesterday,
+                ReportTask.created_at < today,
+            )
         )
 
         return {
@@ -41,7 +102,13 @@ class AdminCRUD:
             "avg_duration": avg_duration,
             "pending_failures": pending_failures,
             "total_tokens": total_tokens,
-            "trends": {k: 0 for k in ["total_users", "total_reports", "today_reports", "running_tasks", "failed_tasks"]},
+            "trends": {
+                "total_users": (users_today or 0) - (users_yesterday or 0),
+                "total_reports": (reports_today or 0) - (reports_yesterday or 0),
+                "today_reports": (reports_today or 0) - (reports_yesterday or 0),
+                "running_tasks": (running_today or 0) - (running_yesterday or 0),
+                "failed_tasks": (failed_today or 0) - (failed_yesterday or 0),
+            },
         }
 
     @staticmethod

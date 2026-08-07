@@ -72,6 +72,13 @@ class PipelineExecutor:
 
     async def execute(self, context: PipelineContext) -> PipelineContext:
         for step in self.plan.steps:
+            # 协作式取消：每个新步骤开始前检查任务是否已被用户停止。
+            # 步骤内部的 LLM 调用无法中途打断，取消在步骤边界生效。
+            if await ReportCRUD.is_task_cancelled(self.plan.task_id):
+                logger.warning(
+                    f"[PipelineExecutor] 任务 {self.plan.task_id} 已取消，停止执行后续步骤"
+                )
+                break
             failed_deps = self._check_dependencies(step)
             if failed_deps:
                 await self._skip_step(step, failed_deps)

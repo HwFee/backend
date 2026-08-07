@@ -240,3 +240,6 @@ Thumbs.db
 images/reports/
 uploads/
 
+
+# Local dev database (SQLite)
+data/

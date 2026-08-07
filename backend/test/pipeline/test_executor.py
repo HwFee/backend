@@ -63,6 +63,7 @@ class TestPipelineExecutor:
             mock_node.id = 100
             mock_crud.create_agent_node = AsyncMock(return_value=mock_node)
             mock_crud.update_node_status = AsyncMock()
+            mock_crud.is_task_cancelled = AsyncMock(return_value=False)
 
             plan = _make_plan([
                 PipelineStep("step_a", "Step A", "fake.success", [], "step_a_output"),
@@ -86,6 +87,7 @@ class TestPipelineExecutor:
             mock_node.id = 100
             mock_crud.create_agent_node = AsyncMock(return_value=mock_node)
             mock_crud.update_node_status = AsyncMock()
+            mock_crud.is_task_cancelled = AsyncMock(return_value=False)
 
             plan = _make_plan([
                 PipelineStep("step_a", "Step A", "fake.success", [], "step_a"),
@@ -109,6 +111,7 @@ class TestPipelineExecutor:
             mock_node.id = 100
             mock_crud.create_agent_node = AsyncMock(return_value=mock_node)
             mock_crud.update_node_status = AsyncMock()
+            mock_crud.is_task_cancelled = AsyncMock(return_value=False)
 
             plan = _make_plan([
                 PipelineStep("step_fail", "Fail Step", "fake.fail", [], "output"),
@@ -132,6 +135,7 @@ class TestPipelineExecutor:
             mock_node.id = 100
             mock_crud.create_agent_node = AsyncMock(return_value=mock_node)
             mock_crud.update_node_status = AsyncMock()
+            mock_crud.is_task_cancelled = AsyncMock(return_value=False)
 
             plan = _make_plan([
                 PipelineStep("step_fail", "Fail", "fake.fail", [], "a"),
@@ -146,6 +150,34 @@ class TestPipelineExecutor:
             assert "b" not in context.artifacts
 
     @pytest.mark.asyncio
+    async def test_execute_stops_between_steps_when_cancelled(self):
+        """协作式取消：步骤之间检测到 cancelled 时，不再执行后续步骤。"""
+        pool = SkillPool()
+        pool.register(FakeSuccessSkill())
+        db = _make_mock_db()
+
+        with patch("pipeline.executor.ReportCRUD") as mock_crud:
+            mock_node = MagicMock()
+            mock_node.id = 100
+            mock_crud.create_agent_node = AsyncMock(return_value=mock_node)
+            mock_crud.update_node_status = AsyncMock()
+            # 第一个步骤开始前未取消，第二个步骤开始前已取消
+            mock_crud.is_task_cancelled = AsyncMock(side_effect=[False, True])
+
+            plan = _make_plan([
+                PipelineStep("step_a", "Step A", "fake.success", [], "step_a_output"),
+                PipelineStep("step_b", "Step B", "fake.success", [], "step_b_output"),
+            ])
+            executor = PipelineExecutor(plan, pool, db)
+            context = PipelineContext(task_id=1, requirement="test", artifacts={})
+            result = await executor.execute(context)
+
+            # 第一步正常执行，第二步被取消跳过
+            assert "step_a_output" in result.artifacts
+            assert "step_b_output" not in result.artifacts
+            assert "step_b_extra" not in result.artifacts
+
+    @pytest.mark.asyncio
     async def test_execute_marks_db_status(self):
         pool = SkillPool()
         pool.register(FakeSuccessSkill())
@@ -156,6 +188,7 @@ class TestPipelineExecutor:
             mock_node.id = 100
             mock_crud.create_agent_node = AsyncMock(return_value=mock_node)
             mock_crud.update_node_status = AsyncMock()
+            mock_crud.is_task_cancelled = AsyncMock(return_value=False)
 
             plan = _make_plan([
                 PipelineStep("step_a", "Step A", "fake.success", [], "output"),
@@ -179,6 +212,7 @@ class TestPipelineExecutor:
             mock_node.id = 100
             mock_crud.create_agent_node = AsyncMock(return_value=mock_node)
             mock_crud.update_node_status = AsyncMock()
+            mock_crud.is_task_cancelled = AsyncMock(return_value=False)
 
             plan = _make_plan([
                 PipelineStep("step_x", "X", "nonexistent.skill", [], "output"),
