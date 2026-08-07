@@ -1,3 +1,8 @@
+/**
+ * API 类型定义 —— 以 docs/api-contract.md（后端代码提取）为准。
+ * 旧版 agent-chat 类型（AgentType/ChatMessage/AgentState/ReportSession 等）已随死代码删除。
+ */
+
 export interface User {
   id: number
   username: string
@@ -7,6 +12,14 @@ export interface User {
 
 export type ReportMode = 'generate' | 'template' | 'reference' | 'edit'
 
+export type ReportTaskStatus =
+  | 'pending'
+  | 'planning'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
 export interface Attachment {
   id: number
   filename: string
@@ -15,12 +28,12 @@ export interface Attachment {
   parsed_length?: number
 }
 
-export interface AgentNodeStatus {
+export interface StepNodeStatus {
   node_id: string
-  agent_type: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
-  started_at?: string
-  completed_at?: string
+  agent_type?: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | string
+  started_at?: string | null
+  completed_at?: string | null
   input_data?: Record<string, unknown>
   output_data?: {
     content?: string
@@ -38,7 +51,7 @@ export interface ReportStatus {
     total_steps: number
     completed_steps: number
   }
-  nodes: AgentNodeStatus[]
+  nodes: StepNodeStatus[]
   attachments: Attachment[]
 }
 
@@ -53,7 +66,7 @@ export interface ReportTask {
   user_id: number
   title: string
   requirement: string
-  status: 'pending' | 'planning' | 'running' | 'completed' | 'failed'
+  status: ReportTaskStatus
   mode?: ReportMode
   dag_plan?: Record<string, unknown>
   model_routing?: string
@@ -65,17 +78,50 @@ export interface ReportTask {
   updated_at: string
 }
 
-export interface AgentNode {
+export interface ArtifactVersion {
   id: number
-  task_id: number
-  node_id: string
-  agent_type: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
-  input_data?: Record<string, unknown>
-  output_data?: Record<string, unknown>
-  retry_count: number
+  version: number
+  content?: string
+  content_hash?: string
+  change_reason?: string
+  created_by?: string
+  source_type?: 'initial_generation' | 'skill_rerun' | 'user_edit' | 'chat_edit' | 'export'
+  source_step_id?: string | null
+  extra_metadata?: Record<string, unknown> | null
+  created_at?: string
+}
+
+export interface Artifact {
+  id: number
+  report_id: number
+  step_id: string
+  skill_id: string
+  logical_name: string
+  filename: string
+  artifact_type: string
+  current_version_id?: number
+  current_version?: ArtifactVersion
+  version_count?: number
   created_at: string
   updated_at: string
+}
+
+export interface ToolEvent {
+  id: number
+  report_id: number
+  step_id: string
+  skill_id: string
+  event_type: string
+  title: string
+  description?: string
+  status: string
+  input_data?: Record<string, unknown>
+  output_data?: Record<string, unknown>
+  artifact_id?: number | null
+  artifact_version_id?: number | null
+  started_at?: string | null
+  completed_at?: string | null
+  sort_order?: number
 }
 
 export interface ApiResponse<T> {
@@ -98,65 +144,6 @@ export interface RegisterRequest {
 export interface ReportGenerateRequest {
   title: string
   requirement: string
-}
-
-export type AgentType = 'master' | 'researcher' | 'analyst' | 'writer' | 'reviewer'
-
-export interface AgentConfig {
-  type: AgentType
-  name: string
-  icon: string // Lucide icon name
-  color: string // Tailwind color class
-  borderColor: string
-  bgColor: string
-}
-
-export type MessageType =
-  | 'user'
-  | 'agent'
-  | 'thinking'
-  | 'tool_call'
-  | 'subagent_call'
-  | 'execution_pending'
-  | 'result'
-  | 'error'
-
-export interface ChatMessage {
-  id: string
-  type: MessageType
-  agentId?: string
-  agentType?: AgentType
-  content?: string
-  toolName?: string
-  toolParams?: Record<string, unknown>
-  toolResult?: string
-  targetAgent?: AgentType
-  task?: string
-  summary?: string
-  details?: string
-  status?: 'completed' | 'failed'
-  timestamp: string
-}
-
-export interface AgentState {
-  id: string
-  type: AgentType
-  name: string
-  status: 'idle' | 'running' | 'completed' | 'failed'
-  messages: ChatMessage[]
-  nodeCount?: number
-}
-
-export interface ReportSession {
-  id: number
-  title: string
-  status: string
-  masterAgent: AgentState
-  subAgents: AgentState[]
-  currentView: 'master' | string
-  reportMarkdown: string
-  pdfUrl?: string
-  docxUrl?: string
 }
 
 export interface PaginatedResponse<T> {
@@ -203,4 +190,62 @@ export interface AdminTask {
   created_at: string
   updated_at: string
   error_msg?: string
+}
+
+export interface AdminUser {
+  id: number
+  username: string
+  email: string
+  role: string
+  created_at: string
+}
+
+export interface TokenTrendPoint {
+  date: string
+  tokens: number
+}
+
+/** 后端 /api/reports/{task_id}/pipeline 返回的 DAG 规划视图 */
+export interface PipelineStep {
+  id: string
+  name: string
+  skill_id: string
+  status: string
+  started_at?: string | null
+  completed_at?: string | null
+}
+
+export interface PipelineView {
+  pipeline_id: string | null
+  task_id: number
+  status: string
+  is_pipeline: boolean
+  steps: PipelineStep[]
+}
+
+/** chat/rerun 响应：action 联合（注意失败也可能是 HTTP 200 + error 字段） */
+export interface ChatEditResponse {
+  action: 'rerun' | 'edit_artifact' | 'edit_final_report' | 'none' | string
+  status?: string
+  error?: string
+  step_id?: string
+  affected_steps?: string[]
+  artifact_id?: number
+  new_version?: number
+  message?: string
+  change_reason?: string
+}
+
+export interface AdminFailedTask {
+  id: number
+  title: string
+  failed_at?: string
+  error_msg?: string
+}
+
+/** 后端 /api/reports/pipeline 返回的流水线步骤定义（admin agents 页与详情页兜底共用） */
+export interface SkillInfo {
+  skill_id: string
+  name: string
+  description?: string
 }
